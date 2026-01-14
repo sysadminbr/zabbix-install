@@ -1,0 +1,175 @@
+#!/bin/bash
+#---------------------------------------
+# Script to install Zabbix (server/web)
+# CitraIT - Excelência em TI
+# Author: luciano@citrait.com.br
+#---------------------------------------
+
+# only runs on ubuntu 24.04
+lsb_release -r | grep 24.04 > /dev/null
+if [ "$?" != "0" ]; then
+    echo "Need to be running ubuntu 24.04"
+	exit 0
+fi
+
+# root detection
+if [ "$(id -u)" != "0" ]; then
+    echo "Need to run as root"
+	exit 0
+fi
+
+# less verbosity during package install
+export DEBIAN_FRONTEND=noninteractive
+
+# system wide adjustments
+timedatectl set-timezone America/Sao_Paulo
+
+# make sure we start patched
+apt update -y -qq && apt upgrade -y -qq
+
+
+# install zabbix repo
+wget https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_7.0+ubuntu24.04_all.deb
+dpkg -i zabbix-release_latest_7.0+ubuntu24.04_all.deb
+apt update -qq
+
+
+# packages
+apt install -y -qq zabbix-server-mysql zabbix-frontend-php zabbix-apache-conf zabbix-sql-scripts zabbix-agent mariadb-server apache2
+
+ 
+# generate mysql_root_password
+export MYSQL_ROOT_PASSWORD=$(openssl rand -base64 16 | tr -dc [:alpha:])
+echo $MYSQL_ROOT_PASSWORD > $HOME/mysql_root_password
+
+# mysql initial setup
+mysql_secure_installation << EOF 
+
+n
+Y
+$MYSQL_ROOT_PASSWORD
+$MYSQL_ROOT_PASSWORD
+Y
+Y
+Y
+Y
+EOF
+
+# generate zabbix password for mysql
+export ZABBIX_DB_PASSWORD=$(openssl rand -base64 16 | tr -dc [:alpha:])
+echo $ZABBIX_DB_PASSWORD > $HOME/zabbix_db_password
+
+
+# create database and user on mysql
+mysql -uroot -p$MYSQL_ROOT_PASSWORD -e "create database zabbix character set utf8mb4 collate utf8mb4_bin;"
+mysql -uroot -p$MYSQL_ROOT_PASSWORD -e "create user zabbix@localhost identified by '$ZABBIX_DB_PASSWORD';"
+mysql -uroot -p$MYSQL_ROOT_PASSWORD -e "grant all privileges on zabbix.* to zabbix@localhost;"
+mysql -uroot -p$MYSQL_ROOT_PASSWORD -e "set global log_bin_trust_function_creators = 1;"
+
+
+# load db schema
+zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | mysql --default-character-set=utf8mb4 -uzabbix -p$ZABBIX_DB_PASSWORD zabbix
+
+
+# restore log_bin 
+mysql --default-character-set=utf8mb4 -uroot -p$MYSQL_ROOT_PASSWORD -e 'set global log_bin_trust_function_creators = 0;'
+
+
+# change dbpassword
+sed -i "s/# DBPassword=/DBPassword=$ZABBIX_DB_PASSWORD/" /etc/zabbix/zabbix_server.conf
+
+
+# remove vanila vhost
+rm /etc/apache2/conf-enabled/zabbix.conf
+
+# add proper vhost
+cat << EOF > /etc/apache2/sites-available/zabbix.conf
+<VirtualHost *:80>
+        ServerAdmin webmaster@localhost
+        DocumentRoot /usr/share/zabbix
+        ErrorLog ${APACHE_LOG_DIR}/error.log
+        CustomLog ${APACHE_LOG_DIR}/access.log combined
+		
+		<Directory "/usr/share/zabbix">
+		Options FollowSymLinks
+		AllowOverride None
+		Order allow,deny
+		Allow from all
+
+		<IfModule mod_php.c>
+			php_value max_execution_time 300
+			php_value memory_limit 128M
+			php_value post_max_size 16M
+			php_value upload_max_filesize 2M
+			php_value max_input_time 300
+			php_value max_input_vars 10000
+			php_value always_populate_raw_post_data -1
+		</IfModule>
+	</Directory>
+
+	<Directory "/usr/share/zabbix/conf">
+		Order deny,allow
+		Deny from all
+		<files *.php>
+			Order deny,allow
+			Deny from all
+		</files>
+	</Directory>
+
+	<Directory "/usr/share/zabbix/app">
+		Order deny,allow
+		Deny from all
+		<files *.php>
+			Order deny,allow
+			Deny from all
+		</files>
+	</Directory>
+
+	<Directory "/usr/share/zabbix/include">
+		Order deny,allow
+		Deny from all
+		<files *.php>
+			Order deny,allow
+			Deny from all
+		</files>
+	</Directory>
+
+	<Directory "/usr/share/zabbix/local">
+		Order deny,allow
+		Deny from all
+		<files *.php>
+			Order deny,allow
+			Deny from all
+		</files>
+	</Directory>
+
+	<Directory "/usr/share/zabbix/vendor">
+		Order deny,allow
+		Deny from all
+		<files *.php>
+			Order deny,allow
+			Deny from all
+		</files>
+	</Directory>
+</VirtualHost>
+EOF
+
+
+# enable the vhost
+a2dissite 000-default.conf
+a2ensite zabbix.conf
+
+# generate the br locale
+locale-gen pt_BR
+
+# restart web server
+systemctl restart zabbix-server zabbix-agent apache2
+systemctl enable zabbix-server zabbix-agent apache2
+
+# end
+echo "Finished installing zabbix server"
+
+
+
+
+
