@@ -159,8 +159,9 @@ EOF
 a2dissite 000-default.conf
 a2ensite zabbix.conf
 
-# generate the br locale
+# generate desired locales
 locale-gen pt_BR
+locale-gen en_US
 
 # restart web server
 systemctl restart zabbix-server zabbix-agent apache2
